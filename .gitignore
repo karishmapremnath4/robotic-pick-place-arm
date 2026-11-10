@@ -1,0 +1,20 @@
+build/
+data/*.csv
+data/*.jsonl
+*.o
+*.d
+*.elf
+*.bin
+*.map
+*.su
+.DS_Store
+# data/viewer.html is committed on purpose: it is the live 3D replay the
+# README links to, self-contained in one file with no external requests.
+# The raw run log (data/run.csv) stays out; it is 69 MB.
+!data/viewer.html
+!data/replay.csv
+!data/replay_events.tsv
+!data/scene.tsv
+data/run.csv
+
+# docs/ figures are committed on purpose: the README links to them.

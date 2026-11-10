@@ -1,0 +1,31 @@
+:name: PPA-100
+:description: Pick and place arm firmware on an emulated Cortex-M4
+
+# Runs the SAME ELF the Makefile.arm build produces. Nothing is recompiled
+# for the emulator and nothing is stubbed out for it: if it runs here it is
+# the image that would be flashed.
+
+using sysbus
+$name?="ppa100"
+mach create $name
+
+machine LoadPlatformDescription @platforms/cpus/stm32f4.repl
+
+$bin?=@build/arm/ppa100.elf
+
+# The firmware's telemetry comes out of USART2 at 115200. Opening the
+# analyzer on it is the only window into what the firmware is doing, which is
+# exactly the situation on a real board with one serial port.
+showAnalyzer usart2
+
+macro reset
+"""
+    sysbus LoadELF $bin
+"""
+
+runMacro $reset
+
+echo ""
+echo "  loaded. 'start' to run, 'pause' to stop."
+echo "  'cpu PC' shows where it is, 'sysbus ReadDoubleWord 0x...' reads memory."
+echo ""

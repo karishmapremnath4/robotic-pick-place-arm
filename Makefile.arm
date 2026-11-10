@@ -1,0 +1,109 @@
+# Cross compile for the STM32F407VG.
+#
+# WHAT IS AND IS NOT IN THIS BUILD
+#
+# Everything in src/ except sim/ and task/machine.cpp. sim/ is the test bench
+# and has no business on a microcontroller; machine.cpp is the host assembly
+# and includes it. The drivers, scheduler, estimator, health monitor, safety
+# supervisor, control loops, sequence, survey and planner all cross compile
+# unchanged, which is the point of the bus abstraction.
+#
+# WHY THESE FLAGS
+#
+#   -fno-exceptions    there is nothing to unwind to, and the tables cost
+#                      kilobytes of flash describing it
+#   -fno-rtti          no dynamic_cast or typeid is used, and the type info
+#                      is dead weight
+#   -fno-threadsafe-statics  function local statics would otherwise pull in a
+#                      guard variable and a lock that cannot work here
+#   -Os                flash is the scarce resource, not cycles: the control
+#                      loop has 3.6 percent of its budget in use
+#   -fstack-usage      emits a .su file per function, which is where the
+#                      stack figures below come from
+#   --gc-sections      with -ffunction-sections, drops everything unreferenced
+
+TC      := $(HOME)/toolchains/arm-gnu-toolchain-14.3.rel1-darwin-arm64-arm-none-eabi/bin
+CXX     := $(TC)/arm-none-eabi-g++
+CC      := $(TC)/arm-none-eabi-gcc
+SIZE    := $(TC)/arm-none-eabi-size
+OBJDUMP := $(TC)/arm-none-eabi-objdump
+NM      := $(TC)/arm-none-eabi-nm
+
+BUILD   := build/arm
+TARGET  := $(BUILD)/ppa100.elf
+
+CPU   := -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
+WARN  := -Wall -Wextra -Wpedantic
+COMMON := $(CPU) $(WARN) -Os -g3 -ffunction-sections -fdata-sections \
+          -fstack-usage -Iinclude -Itarget/stm32f407 -DSTM32F407xx
+
+CFLAGS   := $(COMMON) -std=c11
+CXXFLAGS := $(COMMON) -std=c++17 -fno-exceptions -fno-rtti \
+            -fno-threadsafe-statics -fno-use-cxa-atexit
+
+LDFLAGS := $(CPU) -T target/stm32f407/stm32f407.ld \
+           -specs=nano.specs -specs=nosys.specs \
+           -Wl,--gc-sections -Wl,-Map=$(BUILD)/ppa100.map \
+           -Wl,--print-memory-usage
+
+FW_CXX := src/drivers/imu.cpp src/drivers/encoder.cpp src/drivers/can_node.cpp \
+          src/drivers/laser.cpp src/rtos/scheduler.cpp src/est/ekf.cpp \
+          src/diag/sensor_health.cpp src/diag/safety.cpp \
+          src/task/sequence.cpp src/task/survey.cpp src/task/planner.cpp \
+          target/stm32f407/buses.cpp target/stm32f407/main.cpp
+FW_C   := target/stm32f407/startup.c target/stm32f407/system.c
+
+OBJ := $(FW_CXX:%.cpp=$(BUILD)/%.o) $(FW_C:%.c=$(BUILD)/%.o)
+
+all: $(TARGET) report
+
+$(BUILD)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(TARGET): $(OBJ)
+	$(CXX) $(LDFLAGS) $^ -o $@
+	$(TC)/arm-none-eabi-objcopy -O binary $@ $(BUILD)/ppa100.bin
+
+# The numbers that matter, and the two claims they have to support:
+# that it fits, and that it does not allocate.
+report: $(TARGET)
+	@echo
+	@echo "  sections"
+	@$(SIZE) -A $(TARGET) | grep -E '^\.(isr_vector|text|data|bss|_stack)' \
+	  | awk '{printf "    %-16s %8d bytes\n", $$1, $$2}'
+	@echo
+	@echo "  totals"
+	@$(SIZE) $(TARGET) | tail -1 | awk \
+	  '{printf "    flash used     %8d bytes of 1048576  (%.1f%%)\n", $$1+$$2, \
+	     100*($$1+$$2)/1048576; \
+	    printf "    static RAM     %8d bytes of 131072   (%.1f%%)\n", $$2+$$3, \
+	     100*($$2+$$3)/131072}'
+	@echo
+	@echo "  no dynamic allocation"
+	@if $(NM) $(TARGET) | grep -qE ' (T|t) (malloc|_malloc_r|calloc|realloc)$$'; then \
+	  echo "    FAIL: an allocator was linked in"; exit 1; \
+	else echo "    confirmed: no allocator in the image"; fi
+	@echo
+	@echo "  what the linker kept, and what it dropped"
+	@if $(NM) $(TARGET) | grep -q 'Planner'; then \
+	  echo "    planner      linked in"; \
+	else \
+	  echo "    planner      NOT in this image: main does not call it, so"; \
+	  echo "                 --gc-sections dropped it. Its grid is 38112 B of"; \
+	  echo "                 RAM measured, so a build that plans costs that much."; \
+	fi
+	@echo
+	@echo "  deepest stack frames"
+	@find $(BUILD) -name '*.su' -exec cat {} \; 2>/dev/null \
+	  | awk -F'\t' '{print $$2, $$1}' | sort -rn | head -5 \
+	  | awk '{printf "    %6d bytes  %s\n", $$1, $$2}'
+
+clean:
+	rm -rf $(BUILD)
+
+.PHONY: all clean report
